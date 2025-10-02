@@ -1,0 +1,14 @@
+{
+  "name": "unsloth-ui",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "npm run kill-ports && concurrently \"npm run backend\" \"npm run frontend\" --kill-others --names \"backend,frontend\" --prefix-colors \"blue,green\"",
+    "backend": "cd backend && python main.py",
+    "frontend": "cd frontend && npm run dev",
+    "kill-ports": "npx kill-port 8000 5173 || echo Ports already free"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}
