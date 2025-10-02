@@ -1,13 +1,22 @@
-import { useState, useRef, useEffect } from 'react'
-import { uploadDataset, listDatasets } from '../api/training'
+import { useState, useRef } from 'react'
+import { uploadDataset } from '../api/training'
+import { useDatasets } from '../hooks/useDatasets'
 import HuggingFaceHub from './HuggingFaceHub'
+import DatasetPreviewModal from './DatasetPreviewModal'
+import { formatBytes } from '../utils/formatters'
 
-interface Dataset {
-  name: string
-  size: number
-  created: number
-  rows?: number
-  source?: string
+interface DatasetPreview {
+  valid: boolean
+  errors: string[]
+  warnings: string[]
+  stats: {
+    row_count: number
+    avg_text_length: number
+    min_text_length: number
+    max_text_length: number
+    text_field: string
+  }
+  preview: Record<string, unknown>[]
 }
 
 type TabType = 'local' | 'huggingface'
@@ -17,41 +26,19 @@ export default function DatasetUpload() {
   const [isDragging, setIsDragging] = useState(false)
   const [uploadedFile, setUploadedFile] = useState<string | null>(null)
   const [uploading, setUploading] = useState(false)
-  const [datasets, setDatasets] = useState<Dataset[]>([])
+  const [previewData, setPreviewData] = useState<DatasetPreview | null>(null)
+  const [previewDatasetName, setPreviewDatasetName] = useState<string>('')
+  const [loadingPreview, setLoadingPreview] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  const handleDragOver = (e: React.DragEvent) => {
-    e.preventDefault()
-    setIsDragging(true)
-  }
-
-  const handleDragLeave = () => {
-    setIsDragging(false)
-  }
-
-  const handleDrop = async (e: React.DragEvent) => {
-    e.preventDefault()
-    setIsDragging(false)
-
-    const files = e.dataTransfer.files
-    if (files.length > 0) {
-      await handleFileUpload(files[0])
-    }
-  }
-
-  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files
-    if (files && files.length > 0) {
-      await handleFileUpload(files[0])
-    }
-  }
+  const { datasets, refetch } = useDatasets()
 
   const handleFileUpload = async (file: File) => {
     setUploading(true)
     try {
       const result = await uploadDataset(file)
       setUploadedFile(result.filename)
-      await loadDatasets()
+      await refetch()
       setTimeout(() => setUploadedFile(null), 3000)
     } catch (error) {
       console.error('Upload error:', error)
@@ -61,18 +48,20 @@ export default function DatasetUpload() {
     }
   }
 
-  const loadDatasets = async () => {
+  const previewDataset = async (datasetName: string) => {
+    setLoadingPreview(true)
+    setPreviewDatasetName(datasetName)
     try {
-      const result = await listDatasets()
-      setDatasets(result.datasets || [])
+      const response = await fetch(`http://localhost:8000/api/datasets/${datasetName}/validate`)
+      const data = await response.json()
+      setPreviewData(data)
     } catch (error) {
-      console.error('Error loading datasets:', error)
+      console.error('Error loading preview:', error)
+      alert('Failed to load dataset preview')
+    } finally {
+      setLoadingPreview(false)
     }
   }
-
-  useEffect(() => {
-    loadDatasets()
-  }, [])
 
   return (
     <div className="space-y-6">
@@ -114,69 +103,79 @@ export default function DatasetUpload() {
             </p>
           </div>
 
-      {/* Upload Area */}
-      <div
-        onDragOver={handleDragOver}
-        onDragLeave={handleDragLeave}
-        onDrop={handleDrop}
-        className={`border-2 border-dashed p-12 text-center transition-all duration-300 cursor-pointer ${
-          isDragging
-            ? 'border-[#1a1a1a] bg-[#f5f5f0] shadow-[5px_5px_0_rgba(0,0,0,0.15)]'
-            : 'border-[#1a1a1a] hover:border-[#333333] hover:bg-[#ffffff]'
-        }`}
-        onClick={() => fileInputRef.current?.click()}
-      >
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept=".json,.jsonl,.csv"
-          onChange={handleFileSelect}
-          className="hidden"
-        />
+          {/* Upload Area */}
+          <div
+            onDragOver={(e) => { e.preventDefault(); setIsDragging(true) }}
+            onDragLeave={() => setIsDragging(false)}
+            onDrop={async (e) => {
+              e.preventDefault()
+              setIsDragging(false)
+              if (e.dataTransfer.files.length > 0) {
+                await handleFileUpload(e.dataTransfer.files[0])
+              }
+            }}
+            className={`border-2 border-dashed p-12 text-center transition-all duration-300 cursor-pointer ${
+              isDragging
+                ? 'border-[#1a1a1a] bg-[#f5f5f0] shadow-[5px_5px_0_rgba(0,0,0,0.15)]'
+                : 'border-[#1a1a1a] hover:border-[#333333] hover:bg-[#ffffff]'
+            }`}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".json,.jsonl,.csv"
+              onChange={async (e) => {
+                if (e.target.files && e.target.files.length > 0) {
+                  await handleFileUpload(e.target.files[0])
+                }
+              }}
+              className="hidden"
+            />
 
-        {uploading ? (
-          <div className="space-y-3">
-            <div className="w-12 h-12 border-4 border-[#1a1a1a] border-t-transparent animate-spin mx-auto"></div>
-            <p className="text-[#1a1a1a] font-medium">Uploading...</p>
+            {uploading ? (
+              <div className="space-y-3">
+                <div className="w-12 h-12 border-4 border-[#1a1a1a] border-t-transparent animate-spin mx-auto"></div>
+                <p className="text-[#1a1a1a] font-medium">Uploading...</p>
+              </div>
+            ) : uploadedFile ? (
+              <div className="space-y-3">
+                <div className="w-12 h-12 bg-[#ffffff] border-2 border-[#1a1a1a] flex items-center justify-center mx-auto shadow-[3px_3px_0_rgba(0,0,0,0.1)]">
+                  <svg className="w-6 h-6 text-[#1a1a1a]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                  </svg>
+                </div>
+                <p className="text-[#1a1a1a] font-medium">Uploaded: {uploadedFile}</p>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div className="w-20 h-20 bg-[#ffffff] border-2 border-[#1a1a1a] flex items-center justify-center mx-auto shadow-[4px_4px_0_rgba(0,0,0,0.15)] transform hover:scale-110 transition-transform duration-300">
+                  <svg className="w-10 h-10 text-[#1a1a1a]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                  </svg>
+                </div>
+                <div>
+                  <p className="text-[#1a1a1a] font-semibold text-xl">
+                    Drop your dataset here
+                  </p>
+                  <p className="text-[#666666] text-sm mt-2">
+                    or click to browse files
+                  </p>
+                </div>
+                <div className="inline-flex items-center gap-2 px-4 py-2 bg-[#f5f5f0] border border-[#1a1a1a]">
+                  <svg className="w-4 h-4 text-[#1a1a1a]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                  <span className="text-[#333333] text-xs font-medium">
+                    Supports: .json, .jsonl, .csv
+                  </span>
+                </div>
+              </div>
+            )}
           </div>
-        ) : uploadedFile ? (
-          <div className="space-y-3">
-            <div className="w-12 h-12 bg-[#ffffff] border-2 border-[#1a1a1a] flex items-center justify-center mx-auto shadow-[3px_3px_0_rgba(0,0,0,0.1)]">
-              <svg className="w-6 h-6 text-[#1a1a1a]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-              </svg>
-            </div>
-            <p className="text-[#1a1a1a] font-medium">Uploaded: {uploadedFile}</p>
-          </div>
-        ) : (
-          <div className="space-y-4">
-            <div className="w-20 h-20 bg-[#ffffff] border-2 border-[#1a1a1a] flex items-center justify-center mx-auto shadow-[4px_4px_0_rgba(0,0,0,0.15)] transform hover:scale-110 transition-transform duration-300">
-              <svg className="w-10 h-10 text-[#1a1a1a]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-              </svg>
-            </div>
-            <div>
-              <p className="text-[#1a1a1a] font-semibold text-xl">
-                Drop your dataset here
-              </p>
-              <p className="text-[#666666] text-sm mt-2">
-                or click to browse files
-              </p>
-            </div>
-            <div className="inline-flex items-center gap-2 px-4 py-2 bg-[#f5f5f0] border border-[#1a1a1a]">
-              <svg className="w-4 h-4 text-[#1a1a1a]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-              <span className="text-[#333333] text-xs font-medium">
-                Supports: .json, .jsonl, .csv
-              </span>
-            </div>
-          </div>
-        )}
-      </div>
         </div>
       ) : (
-        <HuggingFaceHub onDatasetPulled={loadDatasets} />
+        <HuggingFaceHub onDatasetPulled={refetch} />
       )}
 
       {/* My Datasets - Shared List */}
@@ -189,7 +188,8 @@ export default function DatasetUpload() {
             {datasets.map((dataset, index) => (
               <div
                 key={index}
-                className="flex items-center justify-between bg-[#ffffff] hover:bg-[#f5f5f0] p-4 border-2 border-[#1a1a1a] hover:shadow-[3px_3px_0_rgba(0,0,0,0.1)] transition-all duration-200 group"
+                className="flex items-center justify-between bg-[#ffffff] hover:bg-[#f5f5f0] p-4 border-2 border-[#1a1a1a] hover:shadow-[3px_3px_0_rgba(0,0,0,0.1)] transition-all duration-200 group cursor-pointer"
+                onClick={() => previewDataset(dataset.name)}
               >
                 <div className="flex items-center space-x-3">
                   <div className="w-12 h-12 bg-[#ffffff] border-2 border-[#1a1a1a] flex items-center justify-center shadow-[2px_2px_0_rgba(0,0,0,0.1)] group-hover:scale-110 transition-transform duration-200">
@@ -202,7 +202,7 @@ export default function DatasetUpload() {
                       {dataset.name}
                     </p>
                     <p className="text-[#666666] text-sm flex items-center gap-2" style={{ fontFamily: 'Georgia, Times New Roman, serif' }}>
-                      {(dataset.size / 1024).toFixed(2)} KB
+                      {formatBytes(dataset.size)}
                       {dataset.rows && <span>• {dataset.rows.toLocaleString()} rows</span>}
                       {dataset.source && <span>• {dataset.source}</span>}
                     </p>
@@ -210,7 +210,8 @@ export default function DatasetUpload() {
                 </div>
                 <div className="opacity-0 group-hover:opacity-100 transition-opacity">
                   <svg className="w-5 h-5 text-[#1a1a1a]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
                   </svg>
                 </div>
               </div>
@@ -218,6 +219,15 @@ export default function DatasetUpload() {
           </div>
         </div>
       )}
+
+      {/* Preview Modal */}
+      <DatasetPreviewModal
+        isOpen={!!previewData}
+        onClose={() => setPreviewData(null)}
+        datasetName={previewDatasetName}
+        previewData={previewData}
+        loading={loadingPreview}
+      />
     </div>
   )
 }

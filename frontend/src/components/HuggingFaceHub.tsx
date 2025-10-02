@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { searchHFDatasets, previewHFDataset, pullHFDataset } from '../api/datasets'
 
 interface HFDataset {
@@ -24,10 +24,24 @@ export default function HuggingFaceHub({ onDatasetPulled }: HuggingFaceHubProps)
   const [searchQuery, setSearchQuery] = useState('')
   const [datasets, setDatasets] = useState<HFDataset[]>([])
   const [searching, setSearching] = useState(false)
-  const [selectedDataset, setSelectedDataset] = useState<string | null>(null)
   const [previewData, setPreviewData] = useState<PreviewData | null>(null)
   const [showPreview, setShowPreview] = useState(false)
   const [pulling, setPulling] = useState(false)
+  const [hasToken, setHasToken] = useState(false)
+
+  useEffect(() => {
+    checkToken()
+  }, [])
+
+  const checkToken = async () => {
+    try {
+      const response = await fetch('http://localhost:8000/api/settings/hf-token')
+      const data = await response.json()
+      setHasToken(!!data.token)
+    } catch (error) {
+      console.error('Error checking token:', error)
+    }
+  }
 
   const handleSearch = async () => {
     setSearching(true)
@@ -43,7 +57,6 @@ export default function HuggingFaceHub({ onDatasetPulled }: HuggingFaceHubProps)
   }
 
   const handlePreview = async (datasetId: string) => {
-    setSelectedDataset(datasetId)
     try {
       const result = await previewHFDataset(datasetId)
       setPreviewData(result)
@@ -57,13 +70,20 @@ export default function HuggingFaceHub({ onDatasetPulled }: HuggingFaceHubProps)
   const handlePull = async (datasetId: string) => {
     setPulling(true)
     try {
-      await pullHFDataset(datasetId)
-      alert(`Successfully pulled ${datasetId}!`)
-      setShowPreview(false)
-      onDatasetPulled() // Refresh dataset list
-    } catch (error) {
+      const response = await pullHFDataset(datasetId)
+      if (response.success) {
+        alert(`Successfully pulled ${datasetId}!`)
+        setShowPreview(false)
+        onDatasetPulled() // Refresh dataset list
+      }
+    } catch (error: unknown) {
       console.error('Error pulling dataset:', error)
-      alert('Failed to pull dataset. Make sure datasets library is installed.')
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+      if (errorMessage.includes('401') || errorMessage.includes('token')) {
+        alert('⚠️ HuggingFace token required!\n\nPlease add your token in the Settings tab first.\n\nGet a free token at: huggingface.co/settings/tokens')
+      } else {
+        alert('Failed to pull dataset. Check console for details.')
+      }
     } finally {
       setPulling(false)
     }
@@ -92,6 +112,35 @@ export default function HuggingFaceHub({ onDatasetPulled }: HuggingFaceHubProps)
           Browse and pull datasets from HuggingFace
         </p>
       </div>
+
+      {/* Token Warning */}
+      {!hasToken && (
+        <div className="bg-[#f5f5f0] border-2 border-black p-4">
+          <div className="flex items-start gap-3">
+            <div className="text-2xl">⚠️</div>
+            <div className="flex-1">
+              <p className="text-black font-semibold mb-1" style={{ fontFamily: 'Georgia, Times New Roman, serif' }}>
+                HuggingFace Token Required
+              </p>
+              <p className="text-gray-700 text-sm mb-2" style={{ fontFamily: 'Georgia, Times New Roman, serif' }}>
+                To pull datasets, you need a HuggingFace access token. Get a free token at{' '}
+                <a
+                  href="https://huggingface.co/settings/tokens"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-black underline hover:no-underline"
+                >
+                  huggingface.co/settings/tokens
+                </a>
+                {' '}and add it in the Settings tab.
+              </p>
+              <p className="text-gray-600 text-xs" style={{ fontFamily: 'Georgia, Times New Roman, serif' }}>
+                Note: You can browse and search without a token, but pulling requires authentication.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Search Bar */}
       <div className="flex gap-2">

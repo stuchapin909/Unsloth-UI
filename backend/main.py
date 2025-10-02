@@ -8,6 +8,9 @@ import json
 
 from docker_manager import DockerManager
 from training_manager import TrainingManager
+from database import Database
+from dataset_validator import DatasetValidator
+from resource_monitor import ResourceMonitor
 
 app = FastAPI(title="Slothbuckler API")
 
@@ -23,6 +26,8 @@ app.add_middleware(
 # Initialize managers
 docker_manager = DockerManager()
 training_manager = TrainingManager()
+db = Database()
+resource_monitor = ResourceMonitor()
 
 # Paths
 WORK_DIR = Path(__file__).parent.parent / "work"
@@ -290,6 +295,53 @@ async def pull_hf_dataset(pull_request: HFDatasetPull):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/datasets/validate")
+async def validate_dataset_endpoint(file: UploadFile = File(...)):
+    """Validate a dataset file before training"""
+    try:
+        # Save temporarily
+        temp_path = DATASETS_DIR / f"_temp_{file.filename}"
+        with open(temp_path, "wb") as f:
+            content = await file.read()
+            f.write(content)
+
+        # Validate
+        result = DatasetValidator.validate_dataset(temp_path)
+
+        # Clean up temp file
+        if temp_path.exists():
+            temp_path.unlink()
+
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/datasets/{dataset_name}/validate")
+async def validate_existing_dataset(dataset_name: str):
+    """Validate an existing dataset"""
+    try:
+        dataset_path = DATASETS_DIR / dataset_name
+        if not dataset_path.exists():
+            raise HTTPException(status_code=404, detail="Dataset not found")
+
+        result = DatasetValidator.validate_dataset(dataset_path)
+
+        # Save validation result to database
+        if result['valid']:
+            stats = result.get('stats', {})
+            db.add_dataset(
+                name=dataset_name,
+                path=str(dataset_path),
+                size_bytes=dataset_path.stat().st_size,
+                row_count=stats.get('row_count'),
+                fields=stats.get('fields'),
+                validated=True
+            )
+
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # ============= TRAINING ENDPOINTS =============
 
@@ -344,22 +396,382 @@ async def websocket_training_logs(websocket: WebSocket):
 
 @app.get("/api/models/list")
 async def list_models():
-    """List all trained models"""
+    """List all trained models with metadata"""
     try:
+        # Get models from database
+        db_models = {m['name']: m for m in db.list_models()}
+
         models = []
         for model_dir in MODELS_DIR.iterdir():
-            if model_dir.is_dir():
+            if model_dir.is_dir() and not model_dir.name.startswith('_'):
                 stat = model_dir.stat()
 
                 # Calculate directory size
                 size = sum(f.stat().st_size for f in model_dir.rglob('*') if f.is_file())
 
-                models.append({
+                model_data = {
                     "name": model_dir.name,
                     "size": size,
-                    "created": stat.st_ctime
-                })
+                    "created": stat.st_ctime,
+                    "path": str(model_dir)
+                }
+
+                # Add database metadata if available
+                if model_dir.name in db_models:
+                    db_model = db_models[model_dir.name]
+                    model_data.update({
+                        "base_model": db_model.get('base_model'),
+                        "training_run_id": db_model.get('training_run_id'),
+                        "metadata": db_model.get('metadata')
+                    })
+
+                models.append(model_data)
+
         return {"models": models}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/models/{model_name}")
+async def delete_model(model_name: str):
+    """Delete a trained model"""
+    try:
+        import shutil
+
+        model_path = MODELS_DIR / model_name
+        if not model_path.exists():
+            raise HTTPException(status_code=404, detail="Model not found")
+
+        # Delete from filesystem
+        shutil.rmtree(model_path)
+
+        # Delete from database
+        db.delete_model(model_name)
+
+        return {"success": True, "message": f"Model '{model_name}' deleted"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/models/{model_name}/export")
+async def export_model_info(model_name: str):
+    """Get model export options"""
+    try:
+        model_path = MODELS_DIR / model_name
+        if not model_path.exists():
+            raise HTTPException(status_code=404, detail="Model not found")
+
+        return {
+            "name": model_name,
+            "path": str(model_path),
+            "export_formats": ["gguf", "ollama"],
+            "note": "GGUF and Ollama export available"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+class ExportRequest(BaseModel):
+    format: str
+    quantization: str = "q4_k_m"  # For GGUF: q4_k_m, q5_k_m, q8_0, etc.
+
+@app.post("/api/models/{model_name}/export/{format}")
+async def export_model(model_name: str, format: str, request: ExportRequest):
+    """Export a model to GGUF or Ollama format"""
+    try:
+        model_path = MODELS_DIR / model_name
+        if not model_path.exists():
+            raise HTTPException(status_code=404, detail="Model not found")
+
+        # Check if container is running
+        containers = docker_manager.docker_client.containers.list(
+            filters={"ancestor": "unsloth/unsloth", "status": "running"}
+        )
+
+        if not containers:
+            raise HTTPException(status_code=503, detail="Docker container not running. Please start the container first.")
+
+        container = containers[0]
+
+        if format.lower() == "gguf":
+            # Generate GGUF export script
+            output_file = f"{model_name}.{request.quantization}.gguf"
+            export_script = f'''
+import sys
+from unsloth import FastLanguageModel
+
+try:
+    print("Loading model for GGUF export...")
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name="/workspace/work/models/{model_name}",
+        max_seq_length=2048,
+        dtype=None,
+        load_in_4bit=True,
+    )
+
+    print("Exporting to GGUF format (quantization: {request.quantization})...")
+    model.save_pretrained_gguf(
+        "/workspace/work/models/{output_file}",
+        tokenizer,
+        quantization_method="{request.quantization}"
+    )
+
+    print("EXPORT_SUCCESS")
+    print(f"Model exported to: /workspace/work/models/{output_file}")
+
+except Exception as e:
+    print(f"ERROR: {{str(e)}}")
+    import traceback
+    traceback.print_exc()
+    sys.exit(1)
+'''
+
+        elif format.lower() == "ollama":
+            # Generate Ollama export script (saves as GGUF then creates Modelfile)
+            output_file = f"{model_name}.Q4_K_M.gguf"
+            modelfile_name = model_name.replace('/', '_').replace(' ', '_')
+
+            export_script = f'''
+import sys
+from unsloth import FastLanguageModel
+
+try:
+    print("Loading model for Ollama export...")
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name="/workspace/work/models/{model_name}",
+        max_seq_length=2048,
+        dtype=None,
+        load_in_4bit=True,
+    )
+
+    print("Exporting to GGUF format for Ollama...")
+    model.save_pretrained_gguf(
+        "/workspace/work/models/{output_file}",
+        tokenizer,
+        quantization_method="q4_k_m"
+    )
+
+    # Create Modelfile for Ollama
+    modelfile_content = f"""FROM /workspace/work/models/{output_file}
+PARAMETER temperature 0.7
+PARAMETER top_p 0.9
+PARAMETER stop "<|im_end|>"
+"""
+
+    with open("/workspace/work/models/Modelfile.{modelfile_name}", "w") as f:
+        f.write(modelfile_content)
+
+    print("EXPORT_SUCCESS")
+    print(f"Model exported to: /workspace/work/models/{output_file}")
+    print(f"Modelfile created: Modelfile.{modelfile_name}")
+    print("")
+    print("To use with Ollama, run:")
+    print(f"  ollama create {modelfile_name} -f work/models/Modelfile.{modelfile_name}")
+
+except Exception as e:
+    print(f"ERROR: {{str(e)}}")
+    import traceback
+    traceback.print_exc()
+    sys.exit(1)
+'''
+
+        else:
+            raise HTTPException(status_code=400, detail=f"Unsupported export format: {format}")
+
+        # Save export script
+        script_path = Path(__file__).parent.parent / "work" / "export_script.py"
+        script_path.write_text(export_script)
+
+        # Execute in container
+        exec_result = container.exec_run(
+            ["python", "/workspace/work/export_script.py"],
+            demux=True
+        )
+
+        # Parse output
+        output = ""
+        error = ""
+        if exec_result.output:
+            for stdout_chunk, stderr_chunk in exec_result.output:
+                if stdout_chunk:
+                    output += stdout_chunk.decode('utf-8')
+                if stderr_chunk:
+                    error += stderr_chunk.decode('utf-8')
+
+        # Check if export was successful
+        if "EXPORT_SUCCESS" in output:
+            return {
+                "success": True,
+                "format": format,
+                "output_file": output_file,
+                "message": f"Model exported successfully to {format.upper()} format",
+                "logs": output
+            }
+        else:
+            return {
+                "success": False,
+                "error": "Export failed",
+                "logs": output,
+                "stderr": error
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+class InferenceRequest(BaseModel):
+    prompt: str
+    max_tokens: int = 100
+    temperature: float = 0.7
+
+@app.post("/api/models/{model_name}/inference")
+async def run_inference(model_name: str, request: InferenceRequest):
+    """Run inference with a trained model"""
+    try:
+        model_path = MODELS_DIR / model_name
+        if not model_path.exists():
+            raise HTTPException(status_code=404, detail="Model not found")
+
+        # Check if container is running
+        containers = docker_manager.docker_client.containers.list(
+            filters={"ancestor": "unsloth/unsloth", "status": "running"}
+        )
+
+        if not containers:
+            raise HTTPException(status_code=503, detail="Docker container not running. Please start the container first.")
+
+        container = containers[0]
+
+        # Generate inference script
+        inference_script = f'''
+import sys
+import torch
+from unsloth import FastLanguageModel
+
+try:
+    print("Loading model...")
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name="/workspace/work/models/{model_name}",
+        max_seq_length=2048,
+        dtype=None,
+        load_in_4bit=True,
+    )
+
+    FastLanguageModel.for_inference(model)
+
+    print("Running inference...")
+    inputs = tokenizer(["""{request.prompt}"""], return_tensors="pt").to("cuda")
+
+    outputs = model.generate(
+        **inputs,
+        max_new_tokens={request.max_tokens},
+        temperature={request.temperature},
+        use_cache=True
+    )
+
+    result = tokenizer.batch_decode(outputs)[0]
+    print("RESULT_START")
+    print(result)
+    print("RESULT_END")
+
+except Exception as e:
+    print(f"ERROR: {{str(e)}}")
+    import traceback
+    traceback.print_exc()
+    sys.exit(1)
+'''
+
+        # Save script to work directory
+        script_path = Path(__file__).parent.parent / "work" / "inference_script.py"
+        script_path.write_text(inference_script)
+
+        # Execute in container
+        exec_result = container.exec_run(
+            ["python", "/workspace/work/inference_script.py"],
+            demux=True
+        )
+
+        # Parse output
+        output = ""
+        if exec_result.output:
+            for stdout_chunk, stderr_chunk in exec_result.output:
+                if stdout_chunk:
+                    output += stdout_chunk.decode('utf-8')
+
+        # Extract result
+        if "RESULT_START" in output and "RESULT_END" in output:
+            result_text = output.split("RESULT_START")[1].split("RESULT_END")[0].strip()
+            return {
+                "success": True,
+                "result": result_text,
+                "prompt": request.prompt
+            }
+        else:
+            return {
+                "success": False,
+                "error": "Failed to generate output",
+                "output": output
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============= RESOURCE MONITORING =============
+
+@app.get("/api/system/resources")
+async def get_system_resources():
+    """Get current system resource usage"""
+    try:
+        return resource_monitor.get_system_resources()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/system/container-stats")
+async def get_container_stats():
+    """Get Docker container resource stats"""
+    try:
+        stats = resource_monitor.get_container_stats()
+        if stats is None:
+            return {"error": "No running container"}
+        return stats
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/system/check-resources")
+async def check_resources(dataset_size_mb: float, model_size_gb: float = 8.0):
+    """Check if system has adequate resources for training"""
+    try:
+        return resource_monitor.check_resources_adequate(dataset_size_mb, model_size_gb)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============= TRAINING HISTORY =============
+
+@app.get("/api/training/history")
+async def get_training_history(limit: int = 50):
+    """Get training run history"""
+    try:
+        return {"runs": db.list_training_runs(limit)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/training/history/{run_id}")
+async def get_training_run_details(run_id: int):
+    """Get detailed information about a training run"""
+    try:
+        run = db.get_training_run(run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Training run not found")
+
+        # Get metrics
+        metrics = db.get_training_metrics(run_id)
+
+        return {
+            "run": run,
+            "metrics": metrics
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -370,6 +782,37 @@ async def list_models():
 async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "service": "slothbuckler-backend"}
+
+@app.get("/api/health/container")
+async def check_container_health():
+    """Check if Docker container is healthy"""
+    try:
+        containers = docker_manager.docker_client.containers.list(
+            filters={"ancestor": "unsloth/unsloth", "status": "running"}
+        )
+
+        if not containers:
+            return {
+                "healthy": False,
+                "message": "No running container"
+            }
+
+        container = containers[0]
+
+        # Test if Unsloth is importable
+        result = container.exec_run(["python", "-c", "import unsloth; print('OK')"])
+
+        return {
+            "healthy": result.exit_code == 0,
+            "container_id": container.short_id,
+            "container_name": container.name,
+            "message": result.output.decode('utf-8').strip() if result.exit_code == 0 else "Unsloth import failed"
+        }
+    except Exception as e:
+        return {
+            "healthy": False,
+            "error": str(e)
+        }
 
 
 # ============= SETTINGS ENDPOINTS =============

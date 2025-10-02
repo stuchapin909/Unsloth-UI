@@ -56,3 +56,15 @@ export async function listModels() {
   const response = await fetch(`${API_BASE}/models/list`)
   return response.json()
 }
+
+export async function getTrainingHistory() {
+  const response = await fetch(`${API_BASE}/training/history`)
+  if (!response.ok) throw new Error('Failed to fetch training history')
+  return response.json()
+}
+
+export async function getTrainingRun(runId: number) {
+  const response = await fetch(`${API_BASE}/training/history/${runId}`)
+  if (!response.ok) throw new Error('Failed to fetch training run')
+  return response.json()
+}

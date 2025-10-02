@@ -4,10 +4,15 @@ import Settings from './components/Settings'
 import DatasetUpload from './components/DatasetUpload'
 import TrainingConfig from './components/TrainingConfig'
 import TrainingProgress from './components/TrainingProgress'
+import TrainingHistory from './components/TrainingHistory'
+import ResourceMonitor from './components/ResourceMonitor'
+import ModelTesting from './components/ModelTesting'
 import { checkDockerStatus } from './api/docker'
 
+type TabType = 'docker' | 'settings' | 'upload' | 'train' | 'progress' | 'history' | 'resources' | 'testing'
+
 function App() {
-  const [activeTab, setActiveTab] = useState<'docker' | 'settings' | 'upload' | 'train' | 'progress'>('docker')
+  const [activeTab, setActiveTab] = useState<TabType>('docker')
   const [isTraining, setIsTraining] = useState(false)
   const [dockerReady, setDockerReady] = useState(false)
 
@@ -49,8 +54,9 @@ function App() {
 
         {/* Main Content */}
         <div className="mt-8">
-          {/* Tabs */}
-            <div className="flex space-x-2 mb-6">
+          {/* Tabs - Two Rows */}
+          <div className="mb-6">
+            <div className="flex space-x-2 mb-2">
               <button
                 onClick={() => setActiveTab('docker')}
                 className={`flex-1 py-3 px-4 font-medium transition-all border-2 border-black ${
@@ -101,6 +107,8 @@ function App() {
               >
                 Training
               </button>
+            </div>
+            <div className="flex space-x-2">
               <button
                 onClick={() => setActiveTab('progress')}
                 disabled={!dockerReady}
@@ -115,7 +123,47 @@ function App() {
               >
                 Progress
               </button>
+              <button
+                onClick={() => setActiveTab('history')}
+                disabled={!dockerReady}
+                className={`flex-1 py-3 px-4 font-medium transition-all border-2 border-black ${
+                  activeTab === 'history'
+                    ? 'bg-black text-white shadow-[3px_3px_0_rgba(0,0,0,0.2)]'
+                    : dockerReady
+                    ? 'bg-white text-black hover:bg-gray-100'
+                    : 'bg-gray-200 text-gray-400 cursor-not-allowed'
+                }`}
+                style={{ fontFamily: 'Georgia, Times New Roman, serif' }}
+              >
+                History
+              </button>
+              <button
+                onClick={() => setActiveTab('testing')}
+                disabled={!dockerReady}
+                className={`flex-1 py-3 px-4 font-medium transition-all border-2 border-black ${
+                  activeTab === 'testing'
+                    ? 'bg-black text-white shadow-[3px_3px_0_rgba(0,0,0,0.2)]'
+                    : dockerReady
+                    ? 'bg-white text-black hover:bg-gray-100'
+                    : 'bg-gray-200 text-gray-400 cursor-not-allowed'
+                }`}
+                style={{ fontFamily: 'Georgia, Times New Roman, serif' }}
+              >
+                Testing
+              </button>
+              <button
+                onClick={() => setActiveTab('resources')}
+                className={`flex-1 py-3 px-4 font-medium transition-all border-2 border-black ${
+                  activeTab === 'resources'
+                    ? 'bg-black text-white shadow-[3px_3px_0_rgba(0,0,0,0.2)]'
+                    : 'bg-white text-black hover:bg-gray-100'
+                }`}
+                style={{ fontFamily: 'Georgia, Times New Roman, serif' }}
+              >
+                Resources
+              </button>
             </div>
+          </div>
 
           {/* Tab Content */}
           <div className="bg-white border-2 border-black p-6 shadow-[5px_5px_0_rgba(0,0,0,0.2)]">
@@ -133,6 +181,9 @@ function App() {
             {activeTab === 'progress' && (
               <TrainingProgress isTraining={isTraining} />
             )}
+            {activeTab === 'history' && <TrainingHistory />}
+            {activeTab === 'testing' && <ModelTesting />}
+            {activeTab === 'resources' && <ResourceMonitor />}
           </div>
         </div>
 
