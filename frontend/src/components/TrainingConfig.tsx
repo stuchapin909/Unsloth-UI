@@ -1,9 +1,15 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { startTraining, listDatasets } from '../api/training'
 import { getAvailableModels } from '../api/docker'
 
 interface TrainingConfigProps {
   onTrainingStart: () => void
+}
+
+interface Dataset {
+  name: string
+  size: number
+  created: number
 }
 
 const DEFAULT_MODELS = [
@@ -15,7 +21,7 @@ const DEFAULT_MODELS = [
 ]
 
 export default function TrainingConfig({ onTrainingStart }: TrainingConfigProps) {
-  const [datasets, setDatasets] = useState<any[]>([])
+  const [datasets, setDatasets] = useState<Dataset[]>([])
   const [availableModels, setAvailableModels] = useState<string[]>(DEFAULT_MODELS)
   const [config, setConfig] = useState({
     model_name: DEFAULT_MODELS[0],
@@ -31,35 +37,31 @@ export default function TrainingConfig({ onTrainingStart }: TrainingConfigProps)
   })
   const [starting, setStarting] = useState(false)
 
-  useEffect(() => {
-    loadDatasets()
-    loadModels()
-  }, [])
-
-  const loadDatasets = async () => {
+  const loadDatasets = useCallback(async () => {
     try {
       const result = await listDatasets()
       setDatasets(result.datasets || [])
     } catch (error) {
       console.error('Error loading datasets:', error)
     }
-  }
+  }, [])
 
-  const loadModels = async () => {
+  const loadModels = useCallback(async () => {
     try {
       const result = await getAvailableModels()
       if (result.models && result.models.length > 0) {
         setAvailableModels(result.models)
-        // Update config if current model isn't in the new list
-        if (!result.models.includes(config.model_name)) {
-          setConfig({ ...config, model_name: result.models[0] })
-        }
       }
     } catch (error) {
       console.error('Error loading models:', error)
       // Keep using default models on error
     }
-  }
+  }, [])
+
+  useEffect(() => {
+    loadDatasets()
+    loadModels()
+  }, [loadDatasets, loadModels])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -90,15 +92,15 @@ export default function TrainingConfig({ onTrainingStart }: TrainingConfigProps)
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
       <div>
-        <h2 className="text-2xl font-bold text-white mb-2">Configure Training</h2>
-        <p className="text-gray-400 text-sm">
+        <h2 className="text-2xl font-bold text-[#1a1a1a] mb-2">Configure Training</h2>
+        <p className="text-[#666666] text-sm">
           Set up your model training parameters
         </p>
       </div>
 
       {/* Model Selection */}
       <div>
-        <label className="block text-sm font-medium text-gray-300 mb-2">
+        <label className="block text-sm font-medium text-[#333333] mb-2">
           Model
         </label>
         <select
@@ -116,7 +118,7 @@ export default function TrainingConfig({ onTrainingStart }: TrainingConfigProps)
 
       {/* Dataset Selection */}
       <div>
-        <label className="block text-sm font-medium text-gray-300 mb-2">
+        <label className="block text-sm font-medium text-[#333333] mb-2">
           Dataset
         </label>
         <select
@@ -135,7 +137,7 @@ export default function TrainingConfig({ onTrainingStart }: TrainingConfigProps)
 
       {/* Output Directory */}
       <div>
-        <label className="block text-sm font-medium text-gray-300 mb-2">
+        <label className="block text-sm font-medium text-[#333333] mb-2">
           Output Model Name
         </label>
         <input
@@ -150,7 +152,7 @@ export default function TrainingConfig({ onTrainingStart }: TrainingConfigProps)
       {/* Training Parameters Grid */}
       <div className="grid grid-cols-2 gap-4">
         <div>
-          <label className="block text-sm font-medium text-gray-300 mb-2">
+          <label className="block text-sm font-medium text-[#333333] mb-2">
             Max Sequence Length
           </label>
           <input
@@ -162,7 +164,7 @@ export default function TrainingConfig({ onTrainingStart }: TrainingConfigProps)
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-gray-300 mb-2">
+          <label className="block text-sm font-medium text-[#333333] mb-2">
             Learning Rate
           </label>
           <input
@@ -175,7 +177,7 @@ export default function TrainingConfig({ onTrainingStart }: TrainingConfigProps)
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-gray-300 mb-2">
+          <label className="block text-sm font-medium text-[#333333] mb-2">
             Epochs
           </label>
           <input
@@ -187,7 +189,7 @@ export default function TrainingConfig({ onTrainingStart }: TrainingConfigProps)
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-gray-300 mb-2">
+          <label className="block text-sm font-medium text-[#333333] mb-2">
             Batch Size
           </label>
           <input
@@ -199,7 +201,7 @@ export default function TrainingConfig({ onTrainingStart }: TrainingConfigProps)
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-gray-300 mb-2">
+          <label className="block text-sm font-medium text-[#333333] mb-2">
             LoRA Rank (r)
           </label>
           <input
@@ -211,7 +213,7 @@ export default function TrainingConfig({ onTrainingStart }: TrainingConfigProps)
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-gray-300 mb-2">
+          <label className="block text-sm font-medium text-[#333333] mb-2">
             LoRA Alpha
           </label>
           <input
@@ -231,7 +233,7 @@ export default function TrainingConfig({ onTrainingStart }: TrainingConfigProps)
       >
         {starting ? (
           <span className="flex items-center justify-center">
-            <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
+            <div className="w-5 h-5 border-2 border-[#ffffff] border-t-transparent animate-spin mr-2"></div>
             Starting Training...
           </span>
         ) : (

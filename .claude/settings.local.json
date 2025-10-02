@@ -21,7 +21,10 @@
       "Bash(findstr:*)",
       "Bash(npm run build:*)",
       "Bash(npm run dev:*)",
-      "Bash(del nul)"
+      "Bash(del nul)",
+      "Read(//c/Users/stuch/OneDrive/Apps/**)",
+      "Bash(npm run lint)",
+      "Bash(pip install:*)"
     ],
     "deny": [],
     "ask": []

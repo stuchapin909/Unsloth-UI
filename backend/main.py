@@ -147,12 +147,146 @@ async def list_datasets():
         for file_path in DATASETS_DIR.iterdir():
             if file_path.is_file():
                 stat = file_path.stat()
+
+                # Count rows if it's a JSON/JSONL file
+                rows = None
+                try:
+                    if file_path.suffix in ['.json', '.jsonl']:
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            if file_path.suffix == '.jsonl':
+                                rows = sum(1 for _ in f)
+                            else:
+                                data = json.load(f)
+                                rows = len(data) if isinstance(data, list) else 1
+                except:
+                    pass
+
                 datasets.append({
                     "name": file_path.name,
                     "size": stat.st_size,
-                    "created": stat.st_ctime
+                    "created": stat.st_ctime,
+                    "rows": rows,
+                    "source": "local"  # local upload or pulled from HF
                 })
         return {"datasets": datasets}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+def get_hf_token():
+    """Get HuggingFace token from config file"""
+    if HF_TOKEN_FILE.exists():
+        return HF_TOKEN_FILE.read_text().strip()
+    return None
+
+@app.get("/api/datasets/hf/search")
+async def search_hf_datasets(query: str = "", limit: int = 20):
+    """Search HuggingFace datasets"""
+    try:
+        from huggingface_hub import HfApi
+
+        token = get_hf_token()
+        api = HfApi(token=token)
+        datasets = api.list_datasets(
+            search=query if query else None,
+            sort="downloads",
+            limit=limit,
+            full=True
+        )
+
+        result = []
+        for ds in datasets:
+            result.append({
+                "id": ds.id,
+                "name": ds.id.split('/')[-1],
+                "author": ds.author,
+                "downloads": getattr(ds, 'downloads', 0),
+                "likes": getattr(ds, 'likes', 0),
+                "updated": str(getattr(ds, 'lastModified', '')),
+                "tags": getattr(ds, 'tags', [])
+            })
+
+        return {"datasets": result}
+    except ImportError:
+        raise HTTPException(status_code=500, detail="huggingface_hub not installed. Run: pip install huggingface_hub")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/datasets/hf/preview/{dataset_id:path}")
+async def preview_hf_dataset(dataset_id: str, limit: int = 5):
+    """Preview samples from a HuggingFace dataset"""
+    try:
+        from datasets import load_dataset
+
+        token = get_hf_token()
+        # Load just a few samples
+        dataset = load_dataset(dataset_id, split="train", streaming=True, token=token)
+        samples = []
+
+        for i, item in enumerate(dataset):
+            if i >= limit:
+                break
+            samples.append(item)
+
+        return {
+            "samples": samples,
+            "dataset_id": dataset_id
+        }
+    except ImportError:
+        raise HTTPException(status_code=500, detail="datasets library not installed. Run: pip install datasets")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+class HFDatasetPull(BaseModel):
+    dataset_id: str
+    split: str = "train"
+    text_field: str | None = None  # Auto-detect if None
+
+@app.post("/api/datasets/hf/pull")
+async def pull_hf_dataset(pull_request: HFDatasetPull):
+    """Pull a dataset from HuggingFace and save locally"""
+    try:
+        from datasets import load_dataset
+
+        token = get_hf_token()
+        if not token:
+            raise HTTPException(
+                status_code=401,
+                detail="HuggingFace token required. Please add your token in Settings."
+            )
+
+        # Load the dataset
+        dataset = load_dataset(pull_request.dataset_id, split=pull_request.split, token=token)
+
+        # Determine text field
+        text_field = pull_request.text_field
+        if not text_field:
+            # Auto-detect common text fields
+            common_fields = ['text', 'prompt', 'instruction', 'input', 'question', 'content']
+            for field in common_fields:
+                if field in dataset.column_names:
+                    text_field = field
+                    break
+
+            if not text_field:
+                text_field = dataset.column_names[0]  # Use first field as fallback
+
+        # Save as JSONL
+        safe_name = pull_request.dataset_id.replace('/', '_').replace('\\', '_')
+        output_path = DATASETS_DIR / f"{safe_name}.jsonl"
+
+        with open(output_path, 'w', encoding='utf-8') as f:
+            for item in dataset:
+                f.write(json.dumps(item) + '\n')
+
+        return {
+            "success": True,
+            "filename": output_path.name,
+            "path": str(output_path),
+            "rows": len(dataset),
+            "text_field": text_field
+        }
+    except ImportError:
+        raise HTTPException(status_code=500, detail="datasets library not installed. Run: pip install datasets")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
